@@ -22,15 +22,21 @@ const listLocalFilesCached = () => {
   return cached;
 };
 
-class ProjectRunningWindow extends AbtractWindow {
-  constructor (...args) {
-    super(...args);
-
-    this.window.webContents.on('did-create-window', (newWindow) => {
-      new DataWindow(this.window, newWindow);
-    });
+/**
+ * @param {string} url
+ * @returns {string|null} eg. "https:" or null if invalid URL
+ */
+const getProtocol = url => {
+  try {
+    return new URL(url).protocol;
+  } catch (e) {
+    return null;
   }
+};
 
+const WEB_PROTOCOLS = ['http:', 'https:'];
+
+class ProjectRunningWindow extends AbtractWindow {
   handlePermissionCheck (permission, details) {
     return (
       // Autoplay audio and media device enumeration
@@ -89,6 +95,12 @@ class ProjectRunningWindow extends AbtractWindow {
   }
 
   onBeforeRequest (details, callback) {
+    if (details.resourceType === 'cspReport' || details.resourceType === 'ping') {
+      return callback({
+        cancel: true
+      });
+    }
+
     const parsed = new URL(details.url);
 
     if (parsed.origin === 'https://cdn.assets.scratch.mit.edu' || parsed.origin === 'https://assets.scratch.mit.edu') {
@@ -116,26 +128,54 @@ class ProjectRunningWindow extends AbtractWindow {
   }
 
   onHeadersReceived (details, callback) {
-    if (settings.bypassCORS) {
-      const newHeaders = {
-        'access-control-allow-origin': '*',
-      };
+    if (
+      settings.bypassCORS &&
+      // Don't give extra powers when fetching our custom protocols
+      WEB_PROTOCOLS.includes(getProtocol(details.url))
+    ) {
+      const newHeaders = {};
 
-      for (const key of Object.keys(details.responseHeaders)) {
-        // Headers from Electron are not normalized, so we have to make sure to remove uppercased
-        // variations on our own.
-        const normalized = key.toLowerCase();
-        if (normalized === 'access-control-allow-origin' || normalized === 'x-frame-options') {
-          // Ignore header.
-        } else if (normalized === 'content-security-policy') {
-          // Remove frame-ancestors header while preserving the rest of the CSP.
-          // frame-ancestors does not fall back to default-src so we just need to remove, not overwrite.
-          // Regex based on ABNF from https://www.w3.org/TR/CSP3/#grammardef-serialized-policy
-          newHeaders[key] = details.responseHeaders[key].map(csp => (
-            csp.replace(/(?:;[\x09\x0A\x0C\x0D\x20]*)?frame-ancestors[\x09\x0A\x0C\x0D\x20]+[^;,]+/ig, '')
-          ));
-        } else {
-          newHeaders[key] = details.responseHeaders[key];
+      const isMainFrame = details.frame === this.window.webContents.mainFrame;
+      if (isMainFrame) {
+        newHeaders['access-control-allow-origin'] = '*';
+      }
+
+      for (const [key, headers] of Object.entries(details.responseHeaders)) {
+        switch (key.toLowerCase()) {
+          case 'access-control-allow-origin':
+            if (isMainFrame) {
+              // Above we forced this header to be *, so ignore any other value
+            } else {
+              newHeaders[key] = headers;
+            }
+            break;
+
+          // Remove x-frame-options so that embedding is allowed
+          case 'x-frame-options':
+            break;
+
+          // Modify CSP frame-ancestors to allow embedding
+          // We modify the report-only header to reduce console spam
+          case 'content-security-policy':
+          case 'content-security-policy-report-only': {
+            // We try to add allowed origins rather than completely remove/replace to reduce possible security impact.
+            const extraFrameAncestors = this.protocol ? this.protocol : null;
+            if (extraFrameAncestors) {
+              // Note that frame-ancestors does not fall back to default-src.
+              // Regex based on ABNF from https://www.w3.org/TR/CSP3/#grammardef-serialized-policy
+              newHeaders[key] = headers.map(csp => (
+                csp.replace(
+                  /((?:;[\x09\x0A\x0C\x0D\x20]*)?frame-ancestors[\x09\x0A\x0C\x0D\x20]+)([^;,]+)/ig,
+                  (_, directiveName, directiveValue) => `${directiveName}${directiveValue} ${extraFrameAncestors}`
+                )
+              ));
+            }
+            break;  
+          }
+
+          default:
+            newHeaders[key] = headers;
+            break;
         }
       }
 
@@ -145,6 +185,21 @@ class ProjectRunningWindow extends AbtractWindow {
     }
 
     super.onHeadersReceived(details, callback);
+  }
+
+  handleWindowOpen (details) {
+    const parsed = new URL(details.url);
+    if (parsed.protocol === 'data:') {
+      // Imported lazily due to circular dependencies
+      const DataPreviewWindow = require('./data-preview');
+      DataPreviewWindow.open(this.window, details.url);
+
+      return {
+        action: 'deny'
+      };
+    }
+
+    return super.handleWindowOpen(details);
   }
 }
 

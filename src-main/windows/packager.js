@@ -2,6 +2,7 @@ const AbstractWindow = require('./abstract');
 const {PACKAGER_NAME} = require('../brand');
 const PackagerPreviewWindow = require('./packager-preview');
 const prompts = require('../prompts');
+const FileAccessWindow = require('./file-access-window');
 
 class PackagerWindow extends AbstractWindow {
   constructor (editorWindow) {
@@ -40,6 +41,10 @@ class PackagerWindow extends AbstractWindow {
       event.returnValue = prompts.confirm(this.window, message);
     });
 
+    ipc.handle('check-drag-and-drop-path', (event, path) => {
+      FileAccessWindow.check(path);
+    });
+
     this.window.webContents.on('did-finish-load', () => {
       // We can't do this from the preload script
       this.window.webContents.executeJavaScript(`
@@ -52,7 +57,8 @@ class PackagerWindow extends AbstractWindow {
     });
 
     this.window.webContents.on('did-create-window', (newWindow) => {
-      new PackagerPreviewWindow(this.window, newWindow);
+      const childWindow = new PackagerPreviewWindow(this.window, newWindow);
+      childWindow.protocol = this.protocol;
     });
 
     this.loadURL('tw-packager://./standalone.html');

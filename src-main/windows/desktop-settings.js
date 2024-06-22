@@ -3,7 +3,8 @@ const AbstractWindow = require('./abstract');
 const {translate, getStrings, getLocale} = require('../l10n');
 const {APP_NAME} = require('../brand');
 const settings = require('../settings');
-const {isEnabledAtBuildTime} = require('../update-checker');
+const {isUpdateCheckerAllowed} = require('../update-checker');
+const RichPresence = require('../rich-presence');
 
 class DesktopSettingsWindow extends AbstractWindow {
   constructor () {
@@ -24,7 +25,7 @@ class DesktopSettingsWindow extends AbstractWindow {
 
     ipc.on('get-settings', (event) => {
       event.returnValue = {
-        updateCheckerAllowed: isEnabledAtBuildTime(),
+        updateCheckerAllowed: isUpdateCheckerAllowed(),
         updateChecker: settings.updateChecker,
         microphone: settings.microphone,
         camera: settings.camera,
@@ -32,7 +33,9 @@ class DesktopSettingsWindow extends AbstractWindow {
         backgroundThrottling: settings.backgroundThrottling,
         bypassCORS: settings.bypassCORS,
         spellchecker: settings.spellchecker,
-        exitFullscreenOnEscape: settings.exitFullscreenOnEscape
+        exitFullscreenOnEscape: settings.exitFullscreenOnEscape,
+        richPresenceAvailable: RichPresence.isAvailable(),
+        richPresence: settings.richPresence
       };
     });
 
@@ -89,6 +92,16 @@ class DesktopSettingsWindow extends AbstractWindow {
       await settings.save();
     });
 
+    ipc.handle('set-rich-presence', async (event, richPresence) => {
+      settings.richPresence = richPresence;
+      if (richPresence) {
+        RichPresence.enable();
+      } else {
+        RichPresence.disable();
+      }
+      await settings.save();
+    });
+
     ipc.handle('open-user-data', async () => {
       shell.showItemInFolder(app.getPath('userData'));
     });
@@ -98,8 +111,8 @@ class DesktopSettingsWindow extends AbstractWindow {
 
   getDimensions () {
     return {
-      width: 500,
-      height: 450
+      width: 550,
+      height: 500
     };
   }
 

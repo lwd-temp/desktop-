@@ -13,7 +13,6 @@ const EditorWindow = require('./windows/editor');
 const {checkForUpdates} = require('./update-checker');
 const {tranlateOrNull} = require('./l10n');
 const migrate = require('./migrate');
-const {getPlatform} = require('./platform');
 require('./protocols');
 require('./context-menu');
 require('./menu-bar');
@@ -105,15 +104,6 @@ app.on('session-created', (session) => {
 });
 
 app.on('web-contents-created', (event, webContents) => {
-  webContents.on('will-navigate', (event, url) => {
-    // Only allow windows to refresh, not navigate anywhere.
-    const window = AbstractWindow.getWindowByWebContents(webContents);
-    if (!window || url !== window.initialURL) {
-      event.preventDefault();
-      openExternal(url);
-    }
-  });
-
   // Overwritten by AbstractWindow. We just set this here as a safety measure.
   webContents.setWindowOpenHandler((details) => ({
     action: 'deny'

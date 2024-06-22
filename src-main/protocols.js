@@ -1,17 +1,29 @@
-const fs = require('fs');
 const path = require('path');
-const {PassThrough, Readable} = require('stream');
 const zlib = require('zlib');
-const {app, protocol} = require('electron');
+const nodeURL = require('url');
+const {app, protocol, net} = require('electron');
 const {getDist, getPlatform} = require('./platform');
 const packageJSON = require('../package.json');
 
+/**
+ * @typedef Metadata
+ * @property {string} root
+ * @property {boolean} [standard]
+ * @property {boolean} [supportFetch]
+ * @property {boolean} [secure]
+ * @property {boolean} [brotli]
+ * @property {boolean} [embeddable]
+ * @property {boolean} [stream]
+ */
+
+/** @type {Record<string, Metadata>} */
 const FILE_SCHEMES = {
   'tw-editor': {
     root: path.resolve(__dirname, '../dist-renderer-webpack/editor'),
     standard: true,
     supportFetch: true,
-    secure: true
+    secure: true,
+    embeddable: true, // migration helper
   },
   'tw-desktop-settings': {
     root: path.resolve(__dirname, '../src-renderer/desktop-settings')
@@ -25,7 +37,8 @@ const FILE_SCHEMES = {
   'tw-packager': {
     root: path.resolve(__dirname, '../src-renderer/packager'),
     standard: true,
-    secure: true
+    secure: true,
+    embeddable: true, // migration helper
   },
   'tw-library': {
     root: path.resolve(__dirname, '../dist-library-files'),
@@ -34,19 +47,25 @@ const FILE_SCHEMES = {
   },
   'tw-extensions': {
     root: path.resolve(__dirname, '../dist-extensions'),
-    supportFetch: true
+    supportFetch: true,
+    embeddable: true,
+    stream: true
   },
   'tw-update': {
     root: path.resolve(__dirname, '../src-renderer/update'),
   },
   'tw-security-prompt': {
     root: path.resolve(__dirname, '../src-renderer/security-prompt'),
+  },
+  'tw-file-access': {
+    root: path.resolve(__dirname, '../src-renderer/file-access'),
   }
 };
 
 const MIME_TYPES = new Map();
 MIME_TYPES.set('.html', 'text/html');
 MIME_TYPES.set('.js', 'text/javascript');
+MIME_TYPES.set('.map', 'application/json');
 MIME_TYPES.set('.txt', 'text/plain');
 MIME_TYPES.set('.json', 'application/json');
 MIME_TYPES.set('.wav', 'audio/wav');
@@ -57,6 +76,7 @@ MIME_TYPES.set('.gif', 'image/gif');
 MIME_TYPES.set('.cur', 'image/x-icon');
 MIME_TYPES.set('.ico', 'image/x-icon');
 MIME_TYPES.set('.mp3', 'audio/mpeg');
+MIME_TYPES.set('.mp4', 'video/mp4');
 MIME_TYPES.set('.wav', 'audio/wav');
 MIME_TYPES.set('.ogg', 'audio/ogg');
 MIME_TYPES.set('.ttf', 'font/ttf');
@@ -70,15 +90,29 @@ protocol.registerSchemesAsPrivileged(Object.entries(FILE_SCHEMES).map(([scheme, 
   privileges: {
     standard: !!metadata.standard,
     supportFetchAPI: !!metadata.supportFetch,
-    secure: !!metadata.secure
+    secure: !!metadata.secure,
+    stream: !!metadata.stream
   }
 })));
 
 /**
- * @param {string} xml
+ * Promisified zlib.brotliDecompress
+ */
+const brotliDecompress = (input) => new Promise((resolve, reject) => {
+  zlib.brotliDecompress(input, (error, result) => {
+    if (error) {
+      reject(error);
+    } else {
+      resolve(result);
+    }
+  });
+});
+
+/**
+ * @param {unknown} xml
  * @returns {string}
  */
-const escapeXML = (xml) => xml.replace(/[<>&'"]/g, c => {
+const escapeXML = (xml) => String(xml).replace(/[<>&'"]/g, c => {
   switch (c) {
     case '<': return '&lt;';
     case '>': return '&gt;';
@@ -89,33 +123,23 @@ const escapeXML = (xml) => xml.replace(/[<>&'"]/g, c => {
 });
 
 /**
- * @param {string} text
- * @returns {NodeJS.ReadStream}
- */
-const createStreamWithText = (text) => {
-  const stream = new PassThrough();
-  stream.end(text);
-  return stream;
-};
-
-/**
  * Note that custom extensions will be able to access this page and all of the information in it.
  * @param {Request | Electron.ProtocolRequest} request
  * @param {unknown} errorMessage
  * @returns {string}
  */
-const createErrorPage = (request, errorMessage) => `<!DOCTYPE html>
+const createErrorPageHTML = (request, errorMessage) => `<!DOCTYPE html>
 <html lang="en">
   <head>
     <meta charset="utf8">
-    <meta name="color-scheme" content="dark light">
+    <title>Protocol handler error</title>
   </head>
-  <body>
+  <body bgcolor="white" text="black">
     <h1>Protocol handler error</h1>
-    <pre>${escapeXML('' + errorMessage)}</pre>
+    <p>If you can see this page, <a href="https://github.com/TurboWarp/desktop/issues" target="_blank" rel="noreferrer">please open a GitHub issue</a> or <a href="mailto:contact@turbowarp.org" target="_blank" rel="noreferrer">email us</a> with all the information below.</p>
+    <pre>${escapeXML(errorMessage)}</pre>
     <pre>URL: ${escapeXML(request.url)}</pre>
-    <pre>Version ${packageJSON.version}, Electron ${process.versions.electron}, Platform ${getPlatform()} ${process.arch}, Distribution ${getDist()}</pre>
-    <p>If you can see this page, <a href="https://github.com/TurboWarp/desktop/issues">please open a GitHub issue</a> with all the information above.</p>
+    <pre>Version ${escapeXML(packageJSON.version)}, Electron ${escapeXML(process.versions.electron)}, Platform ${escapeXML(getPlatform())} ${escapeXML(process.arch)}, Distribution ${escapeXML(getDist())}</pre>
   </body>
 </html>`;
 
@@ -124,100 +148,205 @@ const errorPageHeaders = {
   'content-security-policy': 'default-src \'none\''
 };
 
-const createSchemeHandler = (metadata) => {
-  // Forcing a trailing / slightly improves security of the path traversal check later
+/**
+ * @param {Metadata} metadata
+ * @returns {Record<string, string>}
+ */
+const getBaseProtocolHeaders = metadata => {
+  const result = {
+    // Make sure the browser always trusts our content-type
+    // (probably does not do anything here)
+    'x-content-type-options': 'nosniff'
+  };
+
+  // Don't allow things like extensiosn to embed custom protocols
+  if (!metadata.embeddable) {
+    result['x-frame-options'] = 'DENY';
+  }
+
+  return result;
+};
+
+/** @param {Metadata} metadata */
+const createModernProtocolHandler = (metadata) => {
   const root = path.join(metadata.root, '/');
+  const baseHeaders = getBaseProtocolHeaders(metadata);
+
+  /**
+   * @param {Request} request
+   * @returns {Promise<Response>}
+   */
+  return async (request) => {
+    const createErrorResponse = (error) => {
+      console.error(error);
+      return new Response(createErrorPageHTML(request, error), {
+        status: 400,
+        headers: {
+          ...baseHeaders,
+          ...errorPageHeaders
+        }
+      });
+    };
+
+    try {
+      const parsedURL = new URL(request.url);
+      const resolved = path.join(root, parsedURL.pathname);
+      if (!resolved.startsWith(root)) {
+        return createErrorResponse(new Error('Path traversal blocked'));
+      }
+  
+      const fileExtension = path.extname(resolved);
+      const mimeType = MIME_TYPES.get(fileExtension);
+      if (!mimeType) {
+        return createErrorResponse(new Error(`Invalid file extension: ${fileExtension}`));
+      }
+  
+      const headers = {
+        ...baseHeaders,
+        'content-type': mimeType
+      };
+  
+      if (metadata.brotli) {
+        // Reading it all into memory is not ideal, but we've had so many problems with streaming
+        // files from the asar that I can settle with this.
+        const brotliResponse = await net.fetch(nodeURL.pathToFileURL(`${resolved}.br`));
+        const brotliData = await brotliResponse.arrayBuffer();
+        const decompressed = await brotliDecompress(brotliData);
+        return new Response(decompressed, {
+          headers
+        });
+      }
+  
+      const response = await net.fetch(nodeURL.pathToFileURL(resolved));
+      return new Response(response.body, {
+        headers
+      });
+    } catch (error) {
+      return createErrorResponse(error);
+    }
+  };
+};
+
+/** @param {Metadata} metadata */
+const createLegacyBrotliProtocolHandler = (metadata) => {
+  const root = path.join(metadata.root, '/');
+  const baseHeaders = getBaseProtocolHeaders(metadata);
 
   /**
    * @param {Electron.ProtocolRequest} request
-   * @returns {Promise<{data: ReadableStream; error?: unknown; headers?: Record<string, string>}>}
+   * @param {(result: {data: Buffer; statusCode?: number; headers?: Record<string, string>;}) => void} callback
    */
-  return async (request) => {
-    const url = new URL(request.url);
-    const resolved = path.join(root, url.pathname);
-    if (!resolved.startsWith(root)) {
-      throw new Error('Path traversal blocked');
-    }
+  return async (request, callback) => {
+    const fsPromises = require('fs/promises');
 
-    const fileExtension = path.extname(url.pathname);
-    const mimeType = MIME_TYPES.get(fileExtension);
-    if (!mimeType) {
-      throw new Error(`Invalid file extension: ${fileExtension}`);
-    }
-
-    const headers = {
-      'content-type': mimeType
+    const returnErrorPage = (error) => {
+      console.error(error);
+      callback({
+        data: Buffer.from(createErrorPageHTML(request, error)),
+        statusCode: 400,
+        headers: {
+          ...baseHeaders,
+          ...errorPageHeaders
+        }
+      });
     };
 
-    if (metadata.brotli) {
-      const fileStream = fs.createReadStream(`${resolved}.br`);
-      const decompressStream = zlib.createBrotliDecompress();
-      fileStream.pipe(decompressStream);
+    try {
+      const parsedURL = new URL(request.url);
+      const resolved = path.join(root, parsedURL.pathname);
+      if (!resolved.startsWith(root)) {
+        returnErrorPage(new Error('Path traversal blocked'));
+        return;
+      }
+  
+      const fileExtension = path.extname(resolved);
+      const mimeType = MIME_TYPES.get(fileExtension);
+      if (!mimeType) {
+        returnErrorPage(new Error(`Invalid file extension: ${fileExtension}`));
+        return;
+      }
 
-      return new Promise((resolve, reject) => {
-        // TODO: this still returns 200 OK when brotli stream errors
-        fileStream.on('open', () => {
-          resolve({
-            data: decompressStream,
-            headers
-          });
-        });
-        fileStream.on('error', (error) => {
-          console.error(error);
-          reject(new Error(`Brotli file stream error: ${error.code || 'unknown'}`));
-        });
+      // Reading it all into memory is not ideal, but we've had so many problems with streaming
+      // files from the asar that I can settle with this.
+      const brotliData = await fsPromises.readFile(`${resolved}.br`);
+      const decompressed = await brotliDecompress(brotliData);
+
+      callback({
+        data: decompressed,
+        headers: {
+          ...baseHeaders,
+          'content-type': mimeType
+        }
       });
+    } catch (error) {
+      returnErrorPage(error);
     }
+  };
+};
 
-    const fileStream = fs.createReadStream(resolved);
-    return new Promise((resolve, reject) => {
-      fileStream.on('open', () => {
-        resolve({
-          data: fileStream,
-          headers
-        });
+/** @param {Metadata} metadata */
+const createLegacyFileProtocolHandler = (metadata) => {
+  const root = path.join(metadata.root, '/');
+  const baseHeaders = getBaseProtocolHeaders(metadata);
+
+  /**
+   * @param {Electron.ProtocolRequest} request
+   * @param {(result: {path: string; statusCode?: number; headers?: Record<string, string>;}) => void} callback
+   */
+  return (request, callback) => {
+    const returnErrorResponse = (error, errorPage) => {
+      console.error(error);
+      callback({
+        status: 400,
+        // All we can return is a file path, so we just have a few different ones baked in
+        // for each error that we expect.
+        path: path.join(__dirname, `../src-protocol-error/legacy-file/${errorPage}.html`),
+        headers: {
+          ...baseHeaders,
+          ...errorPageHeaders
+        }
       });
-      fileStream.on('error', (error) => {
-        console.error(error);
-        reject(new Error(`File stream error: ${error.code || 'unknown'}`));
+    };
+
+    try {
+      const parsedURL = new URL(request.url);
+      const resolved = path.join(root, parsedURL.pathname);
+      if (!resolved.startsWith(root)) {
+        returnErrorResponse(new Error('Path traversal blocked'), 'path-traversal');
+        return;
+      }
+  
+      const fileExtension = path.extname(resolved);
+      const mimeType = MIME_TYPES.get(fileExtension);
+      if (!mimeType) {
+        returnErrorResponse(new Error(`Invalid file extension: ${fileExtension}`), 'invalid-extension');
+        return;
+      }
+
+      callback({
+        path: resolved,
+        headers: {
+          ...baseHeaders,
+          'content-type': mimeType
+        }
       });
-    });
+    } catch (error) {
+      returnErrorResponse(error, 'unknown');
+    }
   };
 };
 
 app.whenReady().then(() => {
   for (const [scheme, metadata] of Object.entries(FILE_SCHEMES)) {
-    const handle = createSchemeHandler(metadata);
-
-    // Electron 22 does not support protocol.handle() or new Response()
+    // Electron 22 (used by Windows 7/8/8.1 build) does not support protocol.handle() or new Response()
     if (protocol.handle) {
-      protocol.handle(scheme, async (request) => {
-        try {
-          const response = await handle(request);
-          return new Response(Readable.toWeb(response.data), {
-            status: 200,
-            headers: response.headers
-          });
-        } catch (error) {
-          return new Response(createErrorPage(request, error), {
-            status: 404,
-            headers: errorPageHeaders
-          });
-        }
-      });
+      protocol.handle(scheme, createModernProtocolHandler(metadata));
     } else {
-      protocol.registerStreamProtocol(scheme, (request, callback) => {
-        handle(request)
-          .then(callback)
-          .catch((error) => {
-            console.error(error);
-            callback({
-              statusCode: 404,
-              data: createStreamWithText(createErrorPage(request, error)),
-              headers: errorPageHeaders
-            });
-          });
-      });
+      if (metadata.brotli) {
+        protocol.registerBufferProtocol(scheme, createLegacyBrotliProtocolHandler(metadata));
+      } else {
+        protocol.registerFileProtocol(scheme, createLegacyFileProtocolHandler(metadata));
+      }
     }
   }
 });

@@ -14,6 +14,8 @@ const {APP_NAME} = require('../brand');
 const prompts = require('../prompts');
 const settings = require('../settings');
 const privilegedFetch = require('../fetch');
+const RichPresence = require('../rich-presence.js');
+const FileAccessWindow = require('./file-access-window.js');
 
 const TYPE_FILE = 'file';
 const TYPE_URL = 'url';
@@ -130,6 +132,60 @@ const parseOpenedFile = (file, workingDirectory) => {
   return new OpenedFile(TYPE_FILE, path.resolve(workingDirectory, file));
 };
 
+/**
+ * @returns {Array<{path: string; app: string;}>}
+ */
+const getUnsafePaths = () => {
+  if (process.platform !== 'win32') {
+    // This problem doesn't really exist on other platforms
+    return [];
+  }
+
+  const localPrograms = path.join(app.getPath('home'), 'AppData', 'Local', 'Programs');
+  const appData = app.getPath('appData');
+  return [
+    // Current app, regardless of where it is installed or how modded it is
+    {
+      path: path.dirname(app.getPath('exe')),
+      app: APP_NAME,
+    },
+    {
+      path: app.getPath('userData'),
+      app: APP_NAME,
+    },
+
+    // TurboWarp Desktop defaults
+    {
+      path: path.join(appData, 'turbowarp-desktop'),
+      app: 'TurboWarp Desktop'
+    },
+    {
+      path: path.join(localPrograms, 'TurboWarp'),
+      app: 'TurboWarp Desktop'
+    },
+
+    // Scratch Desktop defaults
+    {
+      path: path.join(appData, 'Scratch'),
+      app: 'Scratch Desktop'
+    },
+    {
+      path: path.join(localPrograms, 'Scratch 3'),
+      app: 'Scratch Desktop'
+    }
+  ];
+};
+
+/**
+ * @param {string} parent
+ * @param {string} child
+ * @returns {boolean}
+ */
+const isChildPath = (parent, child) => {
+  const relative = path.relative(parent, child);
+  return !!relative && !relative.startsWith('..') && !path.isAbsolute(relative);
+};
+
 class EditorWindow extends ProjectRunningWindow {
   /**
    * @param {OpenedFile|null} file
@@ -148,6 +204,8 @@ class EditorWindow extends ProjectRunningWindow {
       this.openedFiles.push(file);
       this.activeFileIndex = 0;
     }
+
+    this.openedProjectAt = Date.now();
 
     const getFileByIndex = (index) => {
       if (typeof index !== 'number') {
@@ -183,11 +241,19 @@ class EditorWindow extends ProjectRunningWindow {
       event.preventDefault();
       if (explicitSet && title) {
         this.window.setTitle(`${title} - ${APP_NAME}`);
+        this.projectTitle = title;
       } else {
         this.window.setTitle(APP_NAME);
+        this.projectTitle = '';
       }
+
+      this.updateRichPresence();
     });
     this.window.setTitle(APP_NAME);
+
+    this.window.on('focus', () => {
+      this.updateRichPresence();
+    });
 
     const ipc = this.window.webContents.ipc;
 
@@ -240,6 +306,7 @@ class EditorWindow extends ProjectRunningWindow {
         throw new Error('Not a file');
       }
       this.activeFileIndex = index;
+      this.openedProjectAt = Date.now();
       this.window.setRepresentedFilename(file.path);
     });
 
@@ -289,6 +356,22 @@ class EditorWindow extends ProjectRunningWindow {
       }
 
       const file = result.filePath;
+
+      const unsafePath = getUnsafePaths().find(i => isChildPath(i.path, file));
+      if (unsafePath) {
+        // No need to wait for the message box to close
+        dialog.showMessageBox(this.window, {
+          type: 'error',
+          title: APP_NAME,
+          message: translate('unsafe-path.title'),
+          detail: translate(`unsafe-path.details`)
+            .replace('{APP_NAME}', unsafePath.app)
+            .replace('{file}', file),
+          noLink: true
+        });  
+        return null;
+      }
+
       settings.lastDirectory = path.dirname(file);
       await settings.save();
 
@@ -426,6 +509,10 @@ class EditorWindow extends ProjectRunningWindow {
       };
     });
 
+    ipc.handle('check-drag-and-drop-path', (event, filePath) => {
+      FileAccessWindow.check(filePath);
+    });
+
     /**
      * Refers to the full screen button in the editor, not the OS-level fullscreen through
      * F11/Alt+Enter (Windows, Linux) or buttons provided by the OS (macOS).
@@ -486,6 +573,10 @@ class EditorWindow extends ProjectRunningWindow {
 
   canExitFullscreenByPressingEscape () {
     return !this.isInEditorFullScreen;
+  }
+
+  updateRichPresence () {
+    RichPresence.setActivity(this.projectTitle, this.openedProjectAt);
   }
 
   /**

@@ -2,6 +2,28 @@ This document is the authoritative source for TurboWarp's changelogs. Everything
 
 Prefix notes with "Windows:", "macOS:", or "Linux:" as needed. Do not use **formatting** or [links](https://desktop.turbowarp.org/).
 
+# 1.12.3 (2024-06-02)
+
+ - Fixed one-time data migration from versions before 1.9.0
+ - Fixed default URL in video extension
+
+# 1.12.1 (2024-05-28)
+
+ - Updated packager
+ - Linux: Fixed incorrect metadata in .desktop launcher causing some desktop environments to behave strangely
+ - Linux: Flatpak version now detects drag-and-drop-related permission issues and suggests how to fix them
+
+# 1.12.0 (2024-05-27)
+
+ - New extensions: Pen Plus V7, Simple 3D, Mobile Keyboard, Numerical Encoding V2, Ask Before Closing Tab, Font Manager
+ - Added cloud variables synchronization between all open desktop app windows. This can be disabled under the "Edit" menu
+ - Added optional Rich Presence support. This can be enabled under the "Settings" menu then "Desktop Settings"
+ - Optimized project loading by about 10%
+ - Improved high contrast extension colors
+ - Fixed protocol handler errors
+ - Fixed "Allow extensions to access any website" not allowing certain websites to be embedded using Iframe extension
+ - Various other bug fixes
+
 # 1.11.1 (2024-04-13)
 
  - Fixed addon errors

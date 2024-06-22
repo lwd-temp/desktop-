@@ -1,7 +1,7 @@
 {
   "name": "turbowarp-desktop",
   "description": "Scratch mod with a compiler, dark mode, a bunch of addons, and more.",
-  "version": "1.11.1",
+  "version": "1.12.3",
   "license": "GPL-3.0",
   "author": {
     "email": "contact@turbowarp.org",
@@ -19,18 +19,18 @@
     "semver": "^7.6.0"
   },
   "devDependencies": {
-    "@babel/core": "^7.24.3",
+    "@babel/core": "^7.24.7",
     "@babel/preset-env": "^7.12.16",
     "@babel/preset-react": "^7.13.13",
     "@electron/fuses": "^1.7.0",
-    "adm-zip": "^0.5.10",
+    "adm-zip": "^0.5.14",
     "async-limiter": "^2.0.0",
     "autoprefixer": "^9.8.8",
     "babel-loader": "^8.3.0",
     "copy-webpack-plugin": "^6.4.1",
     "cross-env": "^7.0.3",
     "css-loader": "^1.0.1",
-    "electron": "^29.3.3",
+    "electron": "^31.0.2",
     "electron-builder": "^24.13.3",
     "file-loader": "^6.2.0",
     "postcss": "^8.4.13",
@@ -74,6 +74,10 @@
       {
         "from": "art/icon.png",
         "to": "icon.png"
+      },
+      {
+        "from": "art/icon.svg",
+        "to": "icon.svg"
       }
     ],
     "win": {
@@ -151,6 +155,10 @@
       "synopsis": "Mod of Scratch with a compiler and more features.",
       "description": "TurboWarp is a Scratch mod with a compiler to run projects faster, dark mode for your eyes, a bunch of addons to improve the editor, and more.",
       "category": "Development",
+      "desktop": {
+        "StartupWMClass": "turbowarp-desktop",
+        "Keywords": "scratch;"
+      },
       "extraFiles": [
         "linux-files"
       ],
@@ -185,18 +193,21 @@
       {
         "ext": "sb3",
         "name": "Scratch 3 Project",
+        "description": "Scratch 3 Project",
         "role": "Editor",
         "mimeType": "application/x.scratch.sb3"
       },
       {
         "ext": "sb2",
         "name": "Scratch 2 Project",
+        "description": "Scratch 2 Project",
         "role": "Editor",
         "mimeType": "application/x.scratch.sb2"
       },
       {
         "ext": "sb",
         "name": "Scratch 1 Project",
+        "description": "Scratch 1 Project",
         "role": "Editor",
         "mimeType": "application/x.scratch.sb"
       }
